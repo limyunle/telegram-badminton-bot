@@ -1,85 +1,63 @@
 import os
 import requests
-import datetime
+from datetime import datetime, timedelta
+import pytz
 
-# --- Configuration from environment variables ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-ACTIVITY_ID = os.environ.get("ACTIVITY_ID")
-VENUE_ID = os.environ.get("VENUE_ID")
+def build_activesg_link():
+    # Read environment variables (configurable in AWS Lambda)
+    activity_id = os.environ["ACTIVITY_ID"]
+    venue_id = os.environ["VENUE_ID"]
 
-# Base URL template
-BASE_URL_TEMPLATE = (
-    "https://activesg.gov.sg/facility-bookings/activities/{activity}/venues/{venue}/timeslots"
-)
+    # Set timezone to Singapore
+    singapore_tz = pytz.timezone("Asia/Singapore")
+    now = datetime.now(singapore_tz)
 
-# --- Helper Functions ---
+    # Determine target date (2 weeks later, same day)
+    target_date = now + timedelta(weeks=2)
+    date_str = target_date.strftime("%Y-%m-%d")
 
-def get_singapore_date():
-    """Return the current date in Singapore timezone (UTC+8)."""
-    sg_tz = datetime.timezone(datetime.timedelta(hours=8))
-    return datetime.datetime.now(sg_tz).date()
+    # Define the 3pm and 4pm times (Singapore local time)
+    slot_3pm = singapore_tz.localize(datetime(target_date.year, target_date.month, target_date.day, 15, 0))
+    slot_4pm = singapore_tz.localize(datetime(target_date.year, target_date.month, target_date.day, 16, 0))
 
+    # Convert to UNIX timestamps in milliseconds
+    slot_3pm_ms = int(slot_3pm.timestamp() * 1000)
+    slot_4pm_ms = int(slot_4pm.timestamp() * 1000)
 
-def build_activesg_link(target_date: datetime.date):
-    """Build ActiveSG booking URL for 3PM and 4PM timeslots."""
-    tz_offset = datetime.timedelta(hours=8)
-
-    def to_millis(hour: int):
-        dt = datetime.datetime.combine(target_date, datetime.time(hour, 0)) + tz_offset
-        return int(dt.timestamp() * 1000)
-
-    timeslot_3pm = to_millis(15)
-    timeslot_4pm = to_millis(16)
-
-    base_url = BASE_URL_TEMPLATE.format(activity=ACTIVITY_ID, venue=VENUE_ID)
-    url = (
-        f"{base_url}?date={target_date.isoformat()}"
-        f"&timeslots={timeslot_3pm}&timeslots={timeslot_4pm}"
+    # Construct link
+    link = (
+        f"https://activesg.gov.sg/facility-bookings/activities/{activity_id}/venues/{venue_id}/timeslots"
+        f"?date={date_str}&timeslots={slot_3pm_ms}&timeslots={slot_4pm_ms}"
     )
-    return url
+
+    return link
 
 
-def send_telegram_message(message: str):
-    """Send a message via Telegram Bot API."""
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown",
-        "disable_web_page_preview": True,
-    }
+def send_telegram_message(message):
+    bot_token = os.environ["TELEGRAM_BOT_TOKEN"]
+    chat_id = os.environ["TELEGRAM_CHAT_ID"]
 
-    try:
-        response = requests.post(url, data=payload)
-        response.raise_for_status()
-        print("Telegram message sent successfully.")
-    except Exception as e:
-        print(f"Failed to send Telegram message: {e}")
-        if 'response' in locals():
-            print(response.text)
+    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+    payload = {"chat_id": chat_id, "text": message, "parse_mode": "Markdown"}
+
+    response = requests.post(url, data=payload)
+    response.raise_for_status()
 
 
-def lambda_handler(event=None, context=None):
-    """
-    Lambda entry point — runs every Saturday/Sunday 12PM SGT.
-    Sends ActiveSG ballot link for the same day two weeks later.
-    """
-    today_sg = get_singapore_date()
-    target_date = today_sg + datetime.timedelta(days=14)
+def lambda_handler(event, context):
+    singapore_tz = pytz.timezone("Asia/Singapore")
+    now = datetime.now(singapore_tz)
+    weekday = now.strftime("%A")
 
-    link = build_activesg_link(target_date)
+    # Only send on Saturday or Sunday
+    if weekday not in ["Saturday", "Sunday"]:
+        return {"statusCode": 200, "body": "Not weekend. No message sent."}
+
+    # Build ActiveSG link and message
+    link = build_activesg_link()
     message = f"Please ballot, ignore if already have court for that week\n{link}"
 
+    # Send message
     send_telegram_message(message)
-
-    return {
-        "statusCode": 200,
-        "body": f"Message sent for {target_date} (SGT reference)"
-    }
-
-
-# For local testing
-if __name__ == "__main__":
-    print(lambda_handler())
+    return {"statusCode": 200, "body": "Message sent successfully."}
 
